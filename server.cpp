@@ -1,4 +1,5 @@
 #include "protocol.hpp"
+#include "socket_raii.hpp"
 #include <arpa/inet.h>
 #include <csignal>
 #include <fstream>
@@ -66,29 +67,27 @@ int main(int argc, char** argv) {
         std::cerr << "Could not load valid student data file: " << file_path << '\n';
         return 1;
     }
-    int listener = socket(AF_INET, SOCK_STREAM, 0);
-    if (listener < 0) { perror("socket"); return 1; }
+    Socket listener(socket(AF_INET, SOCK_STREAM, 0));
+    if (!listener.valid()) { perror("socket"); return 1; }
     int reuse = 1;
-    if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-        perror("setsockopt"); close(listener); return 1;
+    if (setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        perror("setsockopt"); return 1;
     }
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(PORT);
     // Bind only to loopback to keep demo service local.
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 || listen(listener, 10) < 0) {
-        perror("bind/listen"); close(listener); return 1;
+    if (bind(listener.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 || listen(listener.get(), 10) < 0) {
+        perror("bind/listen"); return 1;
     }
     std::cout << "Listening on 127.0.0.1:" << PORT << std::endl;
     while (true) {
         sockaddr_in peer{};
         socklen_t len = sizeof(peer);
-        int client = accept(listener, reinterpret_cast<sockaddr*>(&peer), &len);
-        if (client < 0) { if (errno == EINTR) continue; perror("accept"); break; }
-        handle_client(client, directory);
-        close(client);
+        Socket client(accept(listener.get(), reinterpret_cast<sockaddr*>(&peer), &len));
+        if (!client.valid()) { if (errno == EINTR) continue; perror("accept"); break; }
+        handle_client(client.get(), directory);
     }
-    close(listener);
     return 0;
 }
