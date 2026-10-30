@@ -1,40 +1,129 @@
-# Socket Programming — Phase 1 (Safety and Reliability)
+# TCP Client–Server Application (C++17)
 
-This is a revised **local-only** C++ TCP client/server demonstration based on the original 2023 course project. The feature set is unchanged: DNS lookup, student ID lookup, and quit. This version uses **length-prefixed framing** and is **not wire-compatible** with the original binaries; rebuild both sides together.
+A small TCP networking application originally built for a 2023 Computer Networks course and subsequently refactored to practice reliable socket communication, modern C++ resource management, modular design, and automated integration testing.
 
-## Prerequisites
-Linux or Windows Subsystem for Linux (WSL), g++ with C++17 support.
+> **Scope:** An educational, single-threaded IPv4 loopback service — not a production server or a high-frequency trading system.
 
-## Build
-```bash
-g++ -std=c++17 -Wall -Wextra -Wpedantic server.cpp -o server
-g++ -std=c++17 -Wall -Wextra -Wpedantic client.cpp -o client
+## Features
+
+- Interactive TCP client/server communication on `127.0.0.1:1234`
+- IPv4 hostname resolution using `getaddrinfo()`
+- Student ID → email lookup from a local, **synthetic** sample dataset
+- Length-prefixed messages (4-byte network-order length + payload)
+- Partial-send/receive handling and a 4096-byte message limit
+- RAII-based socket lifetime management
+- Automated integration tests through CTest and Python `unittest`
+
+## Architecture
+
+```text
+client.cpp ── TCP length-prefixed protocol ── server.cpp
+                 protocol.hpp                 │
+                                         ┌───┴────────────────┐
+                                         │                    │
+                                 StudentDirectory       DNS lookup
+                            student_directory.*       dns.*
+                                         │
+                                students_sample.txt
+
+socket_raii.hpp: owns POSIX socket descriptors used by the client and server.
 ```
 
+| File | Responsibility |
+| --- | --- |
+| `client.cpp` | Interactive TCP client |
+| `server.cpp` | Listener, client sessions, request dispatch |
+| `protocol.hpp` | Frame encoding/decoding, complete send/receive loops |
+| `socket_raii.hpp` | Move-only RAII wrapper for POSIX socket descriptors |
+| `student_directory.hpp/.cpp` | Load and look up records from a sample file |
+| `dns.hpp/.cpp` | IPv4 hostname resolution |
+| `tests/test_integration.py` | End-to-end network tests |
+| `docs/` | Project technical report |
+
+## Requirements
+
+- Linux (tested in Ubuntu under WSL 2)
+- C++17 compiler (such as GCC)
+- CMake 3.16 or newer
+- Python 3 for running the integration tests (standard library only)
+
+This implementation uses POSIX sockets and does not build natively with Windows Winsock without changes.
+
+## Build
+
+Run from the repository root:
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+This produces `build/server` and `build/client`.
+
 ## Run
-Open two terminals in this folder:
 
-Terminal 1: `./server`
+The server reads `students_sample.txt` from its **working directory** by default. Start both programs from the repository root in separate terminals:
 
-Terminal 2: `./client`
+**Terminal 1**
 
-Use option `1` with `localhost` to test DNS; use option `2` with `DEMO001` to test the sample file; use `3` to quit. The server uses `students_sample.txt` by default. You may pass a different synthetic dataset file as `./server path/to/file`.
+```bash
+./build/server
+```
 
-## Changes versus original
-- Replaces raw 256-byte messages with a 4-byte big-endian length header and up to 4096 bytes of content.
-- Handles partial I/O, EOF, interrupted system calls, and oversized payloads.
-- Uses bounded `std::string` messages and file-backed `std::unordered_map` lookups.
-- Closes each accepted connection before accepting the next client.
-- Uses `getaddrinfo` and validates hostnames at a basic level.
-- Binds only to loopback instead of all interfaces.
-- Uses fictitious student IDs and email addresses for demonstration.
+**Terminal 2**
 
-## Scope and limitations
-- **One client at a time**, not concurrent.
-- No authentication, TLS, remote deployment, or persistent database.
-- TCP server and client are intended for local learning exercises, not production exposure.
-- `getaddrinfo()` may use external DNS, depending on hostname.
-- Original data file is intentionally excluded from this archive.
+```bash
+./build/client
+```
 
-## Next steps
-Phase 2: extract separate service modules, introduce RAII socket wrappers and CMake, and add automated tests.
+Menu options:
+
+1. **DNS** — enter `localhost` to obtain `127.0.0.1`.
+2. **QUERY** — enter `DEMO001` to obtain `alex@example.com` from synthetic sample data.
+3. **QUIT** — end the client session.
+
+The server can also receive an explicit dataset path as its first command-line argument.
+
+## Automated tests
+
+Stop any manually launched server first, because integration tests start their own instance on port `1234`.
+
+```bash
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure -V
+```
+
+CTest launches one Python test suite with **nine integration test cases** covering:
+
+- DNS resolution and blank hostname rejection
+- Student lookup success and missing ID
+- Invalid menu option
+- TCP message fragmentation
+- Reconnection after a normal disconnect
+- Rejection of oversized frames followed by recovery
+- Recovery after abrupt disconnect
+
+These are functional integration tests, not performance or security certification.
+
+## Engineering improvements
+
+**Phase 1 — Reliability & Safety:** Added message framing, complete I/O loops, bounded message size, safer interactive input, improved disconnect handling, and synthetic demonstration data.
+
+**Phase 2 — Modern C++ & Testing:** Introduced RAII socket ownership, extracted DNS and student-directory modules, adopted CMake, and registered automated Python integration tests with CTest.
+
+## Current limitations
+
+- Handles clients sequentially; no concurrent request processing.
+- IPv4 and localhost-only binding by design.
+- Student records are read from a simple text file; no database, authentication, or persistence of changes.
+- DNS lookup is synchronous and can block while resolving names.
+- No latency benchmark, load testing, TLS, or production hardening.
+
+## Project history
+
+Originally a Computer Networks final project (2023). The 2026 revisions focus on code quality, safety, repeatable builds, and testing. The historical commits remain in Git for context; the current source and synthetic dataset are the recommended starting point.
+
+## License
+
+No open-source license is currently provided. Please do not assume permission to reuse or redistribute this code unless a license is added.
