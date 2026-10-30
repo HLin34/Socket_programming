@@ -18,3 +18,18 @@ add_executable(client
 
 target_compile_options(server PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(client PRIVATE -Wall -Wextra -Wpedantic)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+enable_testing()
+
+add_test(NAME tcp_integration
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_integration.py
+            --server $<TARGET_FILE:server>
+)
+
+set_tests_properties(tcp_integration PROPERTIES
+    TIMEOUT 30
+    RUN_SERIAL TRUE
+)
