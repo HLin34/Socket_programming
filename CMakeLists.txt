@@ -24,3 +24,13 @@ set_tests_properties(tcp_concurrency PROPERTIES
     TIMEOUT 30
     RUN_SERIAL TRUE
 )
+add_test(NAME tcp_shutdown
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_shutdown.py
+            --server $<TARGET_FILE:server>
+)
+
+set_tests_properties(tcp_shutdown PROPERTIES
+    TIMEOUT 30
+    RUN_SERIAL TRUE
+)
