@@ -1,4 +1,5 @@
 #include "dns.hpp"
+#include "logger.hpp"
 #include "protocol.hpp"
 #include "socket_raii.hpp"
 #include "student_directory.hpp"
@@ -20,12 +21,13 @@ constexpr uint16_t PORT = 1234;
 // A signal handler must avoid allocations, logging, locks, and thread operations.
 volatile std::sig_atomic_t stop_requested = 0;
 extern "C" void request_stop(int) { stop_requested = 1; }
-void handle_client(int fd, const StudentDirectory& directory) {
+void handle_client(int fd, const StudentDirectory& directory, int client_id) {
     while (send_message(fd, "What's your requirement? 1.DNS 2.QUERY 3.QUIT : ")) {
         std::string option;
         if (!receive_message(fd, option)) break;
-        if (option == "3") break;
+        if (option == "3") { Logger::info("client_quit", client_id); break; }
         if (option != "1" && option != "2") {
+            Logger::warn("invalid_menu", client_id);
             if (!send_message(fd, "Invalid requirement! (choose 1, 2 or 3)\n")) break;
             continue;
         }
@@ -33,8 +35,12 @@ void handle_client(int fd, const StudentDirectory& directory) {
         std::string argument;
         if (!receive_message(fd, argument)) break;
         std::string response;
-        if (option == "1") response = lookup_dns(argument) + "\n";
+        if (option == "1") {
+            Logger::info("request_dns", client_id);
+            response = lookup_dns(argument) + "\n";
+        }
         else {
+            Logger::info("request_student", client_id);
             const auto email = directory.lookup(argument);
             response = email ? "Email: " + *email + "\n" : "No such student ID\n";
         }
@@ -74,6 +80,8 @@ int main(int argc, char** argv) {
         perror("bind/listen"); return 1;
     }
     std::cout << "Listening on 127.0.0.1:" << PORT << std::endl;
+    Logger::info("server_started", 0, "127.0.0.1:1234");
+    int next_client_id = 1;
     // At most 4 client-handler threads, no unbounded thread growth.
     constexpr std::size_t MAX_CLIENTS = 4;
     struct WorkerSlot {
@@ -116,18 +124,23 @@ int main(int argc, char** argv) {
         if (!slot) {
             // Client expects a length-prefixed message. A full server rejects
             // extra connections rather than creating unlimited threads.
+            Logger::warn("capacity_rejected");
             send_message(client.get(), "Server busy: maximum 4 concurrent clients\n");
             continue;
         }
+        const int client_id = next_client_id++;
+        Logger::info("client_connected", client_id);
         slot->client_fd = client.get();
         slot->finished.store(false);
         // Transfer unique ownership of the socket to this worker.
         slot->worker = std::thread(
-            [client = std::move(client), &directory, slot]() mutable {
-                handle_client(client.get(), directory);
+            [client = std::move(client), &directory, slot, client_id]() mutable {
+                handle_client(client.get(), directory, client_id);
+                Logger::info("client_disconnected", client_id);
                 slot->finished.store(true);
             });
     }
+    Logger::info("server_stopping");
     // Stop the clients' blocking reads/writes without stealing ownership of
     // the descriptors from worker threads. Workers close them through RAII.
     for (auto& slot : slots) {
@@ -138,6 +151,7 @@ int main(int argc, char** argv) {
     for (auto& slot : slots) {
         if (slot.worker.joinable()) slot.worker.join();
     }
+    Logger::info("server_stopped");
     std::cout << "Graceful shutdown complete" << std::endl;
     return 0;
 }
