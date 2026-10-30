@@ -1,195 +1,94 @@
-#include <iostream>
-#include <cstdio>
-#include <cstdlib>
-#include <string.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <unistd.h> 
-#include <sys/types.h>       // socket(), bind(), accept()
-#include <sys/socket.h>      // socket(), bind(), listen(), accept()
+#include "protocol.hpp"
 #include <arpa/inet.h>
-#include <vector>
+#include <csignal>
+#include <fstream>
+#include <iostream>
+#include <netdb.h>
+#include <sstream>
+#include <string>
+#include <sys/socket.h>
+#include <unordered_map>
+#include <unistd.h>
 
-#define BUFF_SIZE 256
-#define PORT 1234
+constexpr uint16_t PORT = 1234;
+using StudentDirectory = std::unordered_map<std::string, std::string>;
 
-using namespace std;
+bool load_students(const std::string& path, StudentDirectory& directory) {
+    std::ifstream file(path);
+    if (!file) return false;
+    std::string id, email;
+    while (file >> id >> email) directory[id] = email;
+    return file.eof();
+}
 
-// build a structure to record student id and email in query.txt
-class Student {
-        public:
-            char id[10], email[50];
-            Student() {}
-    };
+std::string lookup_dns(const std::string& hostname) {
+    if (hostname.empty() || hostname.size() > 253 || hostname.find_first_of(" \r\n\t") != std::string::npos)
+        return "Invalid hostname";
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* result = nullptr;
+    int rc = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
+    if (rc != 0) return std::string("DNS lookup failed: ") + gai_strerror(rc);
+    char addr[INET_ADDRSTRLEN]{};
+    bool ok = inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr, addr, sizeof(addr)) != nullptr;
+    freeaddrinfo(result);
+    return ok ? std::string("IP address: ") + addr : "DNS address conversion failed";
+}
 
-vector<Student> st_list;
-
-// read query.txt file and store the data into the list
-void Student_List(){
-    FILE *fp;
-    if ((fp = fopen("query.txt", "r")) == NULL) {
-        printf("File 'query.txt' doesn't exist in the directory.\n");
-        exit(1);
-    }
-    else {
-        Student st;
-        while (fscanf(fp, "%s %s", st.id, st.email) != EOF) {
-            st_list.push_back(st);
+void handle_client(int fd, const StudentDirectory& directory) {
+    while (send_message(fd, "What's your requirement? 1.DNS 2.QUERY 3.QUIT : ")) {
+        std::string option;
+        if (!receive_message(fd, option)) break;
+        if (option == "3") break;
+        if (option != "1" && option != "2") {
+            if (!send_message(fd, "Invalid requirement! (choose 1, 2 or 3)\n")) break;
+            continue;
         }
+        if (!send_message(fd, option == "1" ? "Input hostname: " : "Input student ID: ")) break;
+        std::string argument;
+        if (!receive_message(fd, argument)) break;
+        std::string response;
+        if (option == "1") response = lookup_dns(argument) + "\n";
+        else {
+            auto it = directory.find(argument);
+            response = it == directory.end() ? "No such student ID\n" : "Email: " + it->second + "\n";
+        }
+        if (!send_message(fd, response)) break;
     }
 }
 
-
-int main () {
-
-    struct sockaddr_in myaddr;
-    struct sockaddr_in client_addr;
-    struct hostent *hent;
-
-    // Initialize socket structure
-	bzero((char*) &myaddr, sizeof(myaddr));
-
-    //setup address
-    myaddr.sin_family = PF_INET;
-	myaddr.sin_port = htons(PORT);
-	myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-	int sockfd, streamfd, status, addr_size;
-
-    // call to socket() function to create the socket
-    sockfd = socket(PF_INET, SOCK_STREAM, 0);
-    
-    // check if TCP connection is setup successfully, if failed it will return -1
-    if(sockfd >= 0){
-        printf("The socket is created successfully!\n");
-    } else{
-        printf("The socket fails to be created. \n");
-        exit(1);
+int main(int argc, char** argv) {
+    std::signal(SIGPIPE, SIG_IGN);
+    const std::string file_path = argc > 1 ? argv[1] : "students_sample.txt";
+    StudentDirectory directory;
+    if (!load_students(file_path, directory)) {
+        std::cerr << "Could not load valid student data file: " << file_path << '\n';
+        return 1;
     }
-
-
-    // Ensure that address will not be already in use
-    int reuseaddr = 1;
-    socklen_t reuseaddr_len;
-	reuseaddr_len = sizeof(reuseaddr);
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, reuseaddr_len);
-
-    // bind the server port and address
-    int bind_value = bind(sockfd, (struct sockaddr*) &myaddr, sizeof(myaddr));
-
-    // Check whether the binding is successful
-    if( bind_value < 0){
-        perror("There is an error on binding: ");
-        printf("\n");
-        exit(1);
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0) { perror("socket"); return 1; }
+    int reuse = 1;
+    if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        perror("setsockopt"); close(listener); return 1;
     }
-
-    // listen to socket connections and limilt the amount in the connection queue
-    // here process will go in sleep mode and will wait for the incoming connection
-	listen(sockfd, 10);
-	addr_size = sizeof(client_addr);	
-
-    Student_List();
-
-	while(1) {
-        printf("Waiting for connection...\n");
-
-        // use accept() to deal with connection requests, only call accept() in the server side.
-	    streamfd = accept(sockfd, (struct sockaddr *) &client_addr, (socklen_t *) &addr_size);
-
-        // check whether accpet succesfully
-        if (streamfd < 0)
-        {
-            perror("There is an error on accepting: ");
-            printf("\n");
-            exit(1);
-        }
-
-        // create two array use to send and receive messages
-        char msg_recv[BUFF_SIZE], msg_send[BUFF_SIZE];
-
-        while (1) {
-            
-            // clear the buffer and send the message
-            memset(msg_send, '\0', sizeof(msg_send));  
-            strcpy(msg_send, "What's your requirement? 1.DNS 2.QUERY 3.QUIT : ");
-            write(streamfd, msg_send, strlen(msg_send));
-            
-            // clear the buffer and store the message received
-            memset(msg_recv, '\0', sizeof(msg_recv));   
-            read(streamfd, msg_recv, BUFF_SIZE);
-            
-            // DNS requirement
-            if (!strcmp(msg_recv, "1")) {
-
-                // reply 
-                memset(msg_send, '\0', sizeof(msg_send));
-                strcpy(msg_send, "Input URL address : ");
-                write(streamfd, msg_send, strlen(msg_send));
-
-                // clear the buffer and receive the messages
-                memset(msg_recv, '\0', sizeof(msg_recv));   
-                read(streamfd, msg_recv, BUFF_SIZE);
-                
-                // get the DNS and try to return the address
-                hent = gethostbyname(msg_recv);
-                if (hent == NULL) {
-                    printf("No such DNS\n");
-                    memset(msg_send, '\0', sizeof(msg_send));
-                    strcpy(msg_send, "There is an error: No such DNS!!!\n\n");
-                    write(streamfd, msg_send, strlen(msg_send));
-                }
-                else {
-                    printf("IP Address: %s\n", inet_ntoa(*(struct in_addr*) hent->h_addr));
-                    memset(msg_send, '\0', sizeof(msg_send));
-                    strcpy(msg_send, "address get from the domain name : ");
-                    strcat(msg_send, inet_ntoa(*(struct in_addr*) hent->h_addr));
-                    strcat(msg_send, "\n\n");
-                    write(streamfd, msg_send, strlen(msg_send));
-                }
-            } // query request
-            else if (!strcmp(msg_recv, "2")) {
-
-                // reply 
-                memset(msg_send, '\0', sizeof(msg_send));
-                strcpy(msg_send, "Input student ID : ");
-                write(streamfd, msg_send, strlen(msg_send));
-
-                // clear the buffer and receive the messages
-                memset(msg_recv, '\0', sizeof(msg_recv));
-                read(streamfd, msg_recv, BUFF_SIZE);
-
-                // try to find
-                bool find = false;
-                for (int i = 0; i < st_list.size(); i++) {
-                    if (!strcmp(st_list[i].id, msg_recv)) {
-                        memset(msg_send, '\0', sizeof(msg_send));
-                        strcpy(msg_send, "Email get from the server : ");
-                        strcat(msg_send, st_list[i].email);
-                        strcat(msg_send, "\n\n");
-                        write(streamfd, msg_send, strlen(msg_send));
-                        printf("%s: %s\n", st_list[i].id, st_list[i].email);
-                        find = true;
-                        break;
-                    }
-                }
-                if (!find) {
-                    printf("No such student ID\n");
-                    memset(msg_send, '\0', sizeof(msg_send));
-                    strcpy(msg_send, "Email get from the server : No such student ID\n\n");
-                    write(streamfd, msg_send, strlen(msg_send));
-                }
-            } // Quit
-            else if (!strcmp(msg_recv, "3")) {
-                break;
-            }
-            else {
-                memset(msg_send, '\0', sizeof(msg_send));
-                strcpy(msg_send, "Invalid requirement! (the request should between 1~3)\n\n");
-                write(streamfd, msg_send, strlen(msg_send));
-            }
-        }        
-	}
-    close(streamfd);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(PORT);
+    // Bind only to loopback to keep demo service local.
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 || listen(listener, 10) < 0) {
+        perror("bind/listen"); close(listener); return 1;
+    }
+    std::cout << "Listening on 127.0.0.1:" << PORT << std::endl;
+    while (true) {
+        sockaddr_in peer{};
+        socklen_t len = sizeof(peer);
+        int client = accept(listener, reinterpret_cast<sockaddr*>(&peer), &len);
+        if (client < 0) { if (errno == EINTR) continue; perror("accept"); break; }
+        handle_client(client, directory);
+        close(client);
+    }
+    close(listener);
     return 0;
 }
