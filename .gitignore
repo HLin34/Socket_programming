@@ -1,0 +1,23 @@
+# Compiled binaries
+/server
+/client
+*.o
+*.out
+
+# Real or private datasets
+/query.txt
+
+# Windows metadata
+*:Zone.Identifier
+Thumbs.db
+
+# Operating system / editor
+.DS_Store
+.vscode/
+
+# Build directories
+/build/
+/cmake-build-*/
+
+#Past Report
+/109070025.pdf
