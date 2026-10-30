@@ -1,95 +1,127 @@
-# TCP Client-Server Application
-## Design, Reliability Improvements & Testing
+# TCP Client–Server Application — Technical Report
 
-**Project:** Computer Networks course project (2023), reliability revision (2026)  
-**Language:** C++17 | **Environment:** Linux / Ubuntu on WSL 2  
-**Repository:** https://github.com/HLin34/Socket_programming  
-**Author:** Hung-Chang (Henry) Lin
+**Project history:** Original Computer Networks coursework (2023); reliability, architecture and performance-oriented revisions (2026).
+**Platform:** Linux / WSL Ubuntu, POSIX TCP sockets, C++17, CMake, Python standard-library tests.
+**Document scope:** Describes the Phase 3 branch prior to final merge and release.
 
-### 1. Executive Summary
-This project implements a menu-driven TCP client-server application using POSIX sockets. The original 2023 course implementation supported IPv4 DNS resolution, a student-ID-to-email lookup backed by a local text file, and an interactive quit option. In the 2026 Phase 1 revision, the core functionality was retained while the network protocol, input safety, socket cleanup, and local test data were improved.
+## Executive summary
 
-### 2. System Architecture
-The C++ client connects to a server bound to **127.0.0.1:1234**. The server processes one connection at a time and responds to three menu choices: **1 - DNS lookup**, **2 - student lookup**, and **3 - quit**. Both programs use the shared `protocol.hpp` message helpers. The server loads fictitious student records from `students_sample.txt` into an `std::unordered_map`.
+This project is an educational localhost TCP client/server offering hostname resolution and a synthetic student-ID lookup. Work progressed through three distinct phases: (1) safe framed communication, (2) resource ownership and modular testability, and (3) bounded multi-client handling, graceful shutdown, structured logging, and repeatable application-level benchmark measurements. The server's maximum active-client capacity is four. This is not a production-grade trading networking stack.
 
-**Message flow**
+## 1. System design
 
-```text
-Client                   Server (127.0.0.1:1234)
-  | ---- TCP connect ----> |
-  | <---- menu prompt ---- |
-  | ---- choice 1/2 -----> |
-  | <---- input prompt --- |
-  | ---- input value ----> |
-  | <---- response ------- |
-  | ---- choice 3 -------> |
-  |     disconnect         |
+### 1.1 Request flow
+
+1. Client connects to loopback `127.0.0.1:1234`.
+2. Server accepts the socket; a bounded worker handles each active connection.
+3. Application messages use a 4-byte unsigned network-order length followed by payload, with a 4,096-byte maximum payload.
+4. The interactive menu offers DNS lookup, synthetic student lookup, or quit.
+5. A worker releases socket ownership on completion. Slots are reclaimed to admit later connections.
+
+```
+Client(s) —TCP framing→ listener → bounded worker handler
+                                     ├── dns.* / getaddrinfo()
+                                     └── StudentDirectory / synthetic text file
+                         RAII sockets · Logger · shutdown coordination
 ```
 
-### 3. Network Protocol
-The revised implementation frames each application message using a four-byte unsigned length field in network byte order followed by the message payload.
+The server is sequential **within** each connection and concurrent **across** client connections. Capacity is deliberately limited. A fifth connection while four are occupied receives a busy response instead of spawning an unlimited worker.
 
-```text
-[ uint32 payload length (big-endian) ][ payload bytes ]
-```
+### 1.2 Module responsibilities
 
-`send_all()` and `receive_all()` loop until the requested number of bytes is transferred or a connection error occurs. Incoming messages are limited to **4,096 bytes**. This makes the application independent of how TCP splits or coalesces the underlying byte stream. The revised protocol is incompatible with the legacy unframed client/server: both sides must use the new implementation.
+| Module | Role |
+| --- | --- |
+| `protocol.hpp` | `send_all` and `receive_all` deal with partial I/O and interrupted syscalls; length-prefixed messages |
+| `socket_raii.hpp` | Move-only POSIX file-descriptor wrapper; destructor closes the owned socket |
+| `student_directory.*` | Loads synthetic records and looks up an ID via an encapsulated container |
+| `dns.*` | Hostname validation and IPv4 `getaddrinfo()` resolution |
+| `server.cpp` | Listener, bounded worker coordination, request dispatch, termination |
+| `client.cpp` | Interactive request/response client |
+| `logger.hpp` | Mutex-protected, single-line JSON event output to stderr |
 
-### 4. Implementation Changes
+## 2. Evolution and rationale
 
-| Concern | Original implementation | Phase 1 implementation |
-| --- | --- | --- |
-| Receiving data | Fixed 256-byte buffer and unchecked `read()` | Length-prefixed messages and complete reads |
-| Sending data | Assumed a single `write()` was sufficient | `send_all()` handles partial sends |
-| User input | Unbounded `scanf("%s", ...)` | `std::getline()` |
-| DNS | `gethostbyname()` | `getaddrinfo()` and `inet_ntop()` for IPv4 |
-| Student lookup | `std::vector<Student>` linear scan | `std::unordered_map<std::string, std::string>` |
-| Client cleanup | Accepted socket closed outside the server loop | Accepted socket closed after each session |
-| Network exposure | `INADDR_ANY` | Loopback-only binding |
-| Test data | Course-specific records | Fictitious sample records |
+### Phase 1 — reliable message handling
 
-### 5. Validation
-**Local compilation:** The revised `server.cpp` and `client.cpp` compiled under Ubuntu / WSL using C++17 with `-Wall -Wextra -Wpedantic` and no warnings in the observed build.
+The original implementation was updated to use explicit 32-bit length framing and complete send/receive loops. This matters because TCP transports a byte stream rather than preserving application message boundaries. The design also bounds payload size, handles errors/disconnection and replaces historical data with synthetic examples in the current tree.
 
-**Interactive tests observed:**
+### Phase 2 — modern C++ and testability
 
-| Test | Input / scenario | Result |
-| --- | --- | --- |
-| DNS lookup | `localhost` | Returned `127.0.0.1` |
-| Existing student | `DEMO001` | Returned `alex@example.com` |
-| Missing student | `Unknown` | Displayed `No such student ID` |
-| Invalid menu choice | `9` | Returned an error and continued |
-| Quit and reconnect | `3`, then launch a new client | Second client connected successfully |
+RAII ties socket file descriptors to object lifetime, reducing the risk of early-return leaks and double closes from accidental copying. DNS and student-data functions were extracted into distinct compilation units. CMake captures build dependencies; Python `unittest` scripts under CTest exercise actual socket interactions.
 
-An earlier controlled loopback test also exercised an oversized incoming frame and subsequent reconnection. These tests demonstrate basic functionality, **not** complete security, robustness, or concurrency coverage.
+### Phase 3 — bounded concurrency and observability
 
-### 6. How to Build and Run
+The listener permits up to four active worker handlers using `std::thread`. The concurrent handler path moves socket ownership into its worker. This is a bounded thread-per-connection design, not a pool or async event loop.
+
+Graceful termination responds to SIGINT/SIGTERM through a minimal stop notification, then coordinates cleanup outside the signal handler: stop admitting work, call `shutdown()` on active sockets and join workers. A tested SIGINT case demonstrates clean exit with four idle clients; it does not establish behavior under every blocking DNS condition.
+
+Structured logging emits UTC timestamped JSON Lines with event type, severity and client ID. Mutex serialization prevents multiple workers from interleaving partial log records. The events include connection, lookup type, invalid option, busy rejection, disconnect and stopping/stopped notifications. Request arguments, IDs and email values are intentionally not logged.
+
+## 3. Validation
+
+### Build and CI
 
 ```bash
-g++ -std=c++17 -Wall -Wextra -Wpedantic server.cpp -o server
-g++ -std=c++17 -Wall -Wextra -Wpedantic client.cpp -o client
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-Open two Ubuntu terminals in the repository root:
+The recorded WSL checks passed all three configured CTest suites. The test inventory comprises nine application/protocol cases, five concurrency cases and one standalone SIGINT shutdown check. The Phase 3 branch also showed a successful GitHub Actions `C++ Build and Test` workflow on an Ubuntu runner (commit `cec38b3`).
+
+| Test area | Examples | Known boundary |
+| --- | --- | --- |
+| Protocol / behavior | localhost DNS, missing ID, invalid option, fragmented frame, oversized frame, reconnect | Does not prove all malformed inputs safe |
+| Concurrency | Four simultaneous clients, fifth rejected, capacity reuse, abrupt disconnect | Does not constitute formal race detection |
+| Shutdown | SIGINT with four idle clients, orderly process exit | DNS-in-progress shutdown not separately validated |
+
+### Observability checks
+
+Local manual checks confirmed valid JSON event lines for startup, connection, DNS/student requests, quit/disconnect and shutdown. Logger serialization is implemented with `std::mutex`; no dedicated stress test of log ordering or completeness under high contention is claimed.
+
+## 4. Performance benchmark
+
+### Method
+
+The Python benchmark launches the C++ server on loopback and issues closed-loop student-lookup requests over established sockets. Each client sends one complete interactive request before issuing the next. The study uses 1, 2 and 4 active clients, 30 warm-ups and 200 measured requests **per client per run**, with three runs at each load. The reported row entries are **medians of the per-run statistics**, not percentiles computed from concatenated samples.
+
+The timed application exchange covers menu/prompt frames and request/response; initial connection establishment is excluded. Throughput counts measured successful completions divided by elapsed time, with a small scheduling/start offset noted in the benchmark report.
+
+### Recorded results — October 30, 2026
+
+| Clients | RPS (median) | P50 ms (median) | P95 ms (median) | P99 ms (median) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 11.31 | 88.0039 | 91.9753 | 92.1352 |
+| 2 | 22.64 | 88.0234 | 91.9142 | 92.1839 |
+| 4 | 45.27 | 88.0082 | 91.8354 | 92.2020 |
+
+At four concurrent clients, measured throughput was approximately 4× the single-client case, while recorded P50/P99 values stayed near 88/92 ms. These observations support increased overlap/concurrency for **this** fixed, closed-loop workload, not a general scalability claim.
+
+### Interpretation and limitations
+
+- The benchmark reflects **application-level request response time**, not physical network RTT or server-only processing time.
+- Python client overhead, local WSL scheduling, server JSON logging and multiple small message exchanges all contribute to measured values.
+- A stable ~88 ms median motivates protocol-level investigation. Delayed ACK and Nagle behavior are plausible explanations to test, **not established findings**.
+- This experiment does not test external network conditions, live DNS resolution latency, exchange traffic, TLS, burst arrival patterns or unbounded concurrent load.
+- The reported values should **not** be labeled ultra-low latency or HFT-grade.
+
+## 5. How to reproduce
+
+From the repository root in WSL Ubuntu:
 
 ```bash
-# Terminal 1
-./server
-
-# Terminal 2
-./client
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+python3 benchmarks/benchmark.py --server ./build/server --iterations 200 --warmup 30 --runs 3
 ```
 
-By default, the server loads `students_sample.txt`. The project is designed for local demonstration only; do not expose the test service publicly.
+Stop other servers bound to port `1234` beforehand. The benchmark produces files under `benchmark_results/`, which should be excluded from Git. The synthetic sample input must be present relative to the server's working directory.
 
-### 7. Limitations and Future Work
-- The server is **single-threaded** and handles clients sequentially; concurrent connections and load testing are not yet implemented.
-- Socket ownership uses explicit `close()` calls rather than a dedicated RAII wrapper.
-- There is no authentication, encryption, persistent database, or production logging.
-- Formal unit/integration test automation, sanitizer testing, and CI remain future improvements.
-- IPv4 is used for the current DNS response and TCP listener.
+## 6. Known limitations and possible extensions
 
-### 8. Data Privacy and Provenance
-The original 2023 course report and legacy `query.txt` may contain personal names, student IDs, or email addresses and should not be included in a public-facing portfolio without review. The current demonstration uses synthetic records. Removing a file from the latest Git commit does **not** erase it from previous public Git history; historical exposure should be reviewed separately.
+The service deliberately uses a four-client cap, blocking per-connection threads, IPv4 loopback only and synchronous DNS. It does not include authentication, TLS, persistent storage, fault-injection coverage, sanitizer/race-detector evidence, or a production deployment configuration. Future work, if desired, could include a measured `TCP_NODELAY` comparison, ThreadSanitizer experiments and extended shutdown tests for DNS-in-progress cases. None of these is presented as already implemented.
 
-**Project provenance:** The initial version was developed as a university computer networks final project in 2023. Phase 1 represents a later reliability and documentation revision, not an original 2023 feature set.
+## 7. Portfolio takeaway
+
+This project demonstrates a progression from a working student networking assignment to a more maintainable and measurable C++ application: reliable protocol boundaries, explicit resource ownership, modular builds, practical concurrency controls, regression testing, observable behavior and cautious interpretation of measured performance.

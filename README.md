@@ -1,129 +1,139 @@
 # TCP Client–Server Application (C++17)
 
-A small TCP networking application originally built for a 2023 Computer Networks course and subsequently refactored to practice reliable socket communication, modern C++ resource management, modular design, and automated integration testing.
+[![C++ Build and Test](https://github.com/HLin34/Socket_programming/actions/workflows/ci.yml/badge.svg)](https://github.com/HLin34/Socket_programming/actions/workflows/ci.yml)
 
-> **Scope:** An educational, single-threaded IPv4 loopback service — not a production server or a high-frequency trading system.
+A C++17 TCP networking application originally developed for a **2023 Computer Networks course**, then improved in 2026 through three iterations: reliable TCP messaging, maintainable C++ architecture, and bounded concurrency with performance measurement.
 
-## Features
+**Scope:** Educational IPv4 loopback service (`127.0.0.1:1234`), **not** a production service, exchange gateway, or HFT latency claim.
 
-- Interactive TCP client/server communication on `127.0.0.1:1234`
-- IPv4 hostname resolution using `getaddrinfo()`
-- Student ID → email lookup from a local, **synthetic** sample dataset
-- Length-prefixed messages (4-byte network-order length + payload)
-- Partial-send/receive handling and a 4096-byte message limit
-- RAII-based socket lifetime management
-- Automated integration tests through CTest and Python `unittest`
+## Highlights
+
+- **Reliable framing:** four-byte network-byte-order message length, complete read/write loops, 4,096-byte payload limit.
+- **Resource safety:** move-only RAII socket owner and automatic file-descriptor cleanup.
+- **Modularity:** separate DNS resolution and student-directory components.
+- **Bounded concurrency:** up to four active client handlers; excess connections receive a busy response.
+- **Controlled shutdown:** SIGINT/SIGTERM handling, socket shutdown and worker joins for clean termination.
+- **Thread-safe structured logging:** JSON Lines events with UTC timestamps and client IDs; request values and student emails are not logged.
+- **Reproducible tooling:** CMake, Python standard-library integration tests, CTest, GitHub Actions CI, and a localhost benchmark tool.
 
 ## Architecture
 
 ```text
-client.cpp ── TCP length-prefixed protocol ── server.cpp
-                 protocol.hpp                 │
-                                         ┌───┴────────────────┐
-                                         │                    │
-                                 StudentDirectory       DNS lookup
-                            student_directory.*       dns.*
-                                         │
-                                students_sample.txt
-
-socket_raii.hpp: owns POSIX socket descriptors used by the client and server.
+Interactive C++ Client(s)
+        │   TCP / IPv4 loopback
+        │   [4-byte length][payload]
+        ▼
+  C++ TCP Listener (server.cpp)
+        │
+        ├── bounded client handlers (max 4)
+        │       ├── DNS resolver (dns.*)
+        │       └── StudentDirectory (student_directory.*)
+        │                      └── students_sample.txt (synthetic)
+        ├── RAII socket ownership (socket_raii.hpp)
+        ├── message framing (protocol.hpp)
+        └── synchronized JSON event logging (logger.hpp)
 ```
 
-| File | Responsibility |
+The server handles a bounded number of clients concurrently. Requests on each individual client connection remain sequential; DNS resolution is synchronous. The service binds only to loopback.
+
+## Repository guide
+
+| Path | Responsibility |
 | --- | --- |
-| `client.cpp` | Interactive TCP client |
-| `server.cpp` | Listener, client sessions, request dispatch |
-| `protocol.hpp` | Frame encoding/decoding, complete send/receive loops |
-| `socket_raii.hpp` | Move-only RAII wrapper for POSIX socket descriptors |
-| `student_directory.hpp/.cpp` | Load and look up records from a sample file |
-| `dns.hpp/.cpp` | IPv4 hostname resolution |
-| `tests/test_integration.py` | End-to-end network tests |
-| `docs/` | Project technical report |
+| `server.cpp` / `client.cpp` | TCP listener, handlers, interactive client |
+| `protocol.hpp` | Framed TCP messaging, partial I/O handling |
+| `socket_raii.hpp` | Move-only socket resource owner |
+| `dns.hpp`, `dns.cpp` | IPv4 hostname resolution |
+| `student_directory.hpp`, `student_directory.cpp` | Read-only sample lookup |
+| `logger.hpp` | Mutex-protected JSON Lines event logging |
+| `tests/test_integration.py` | 9 functional/protocol test cases |
+| `tests/test_concurrency.py` | 5 bounded-concurrency cases |
+| `tests/test_shutdown.py` | SIGINT shutdown smoke/integration test |
+| `benchmarks/benchmark.py` | Localhost latency and throughput measurements |
+| `.github/workflows/ci.yml` | Ubuntu CI build and CTest |
+| `docs/TECHNICAL_REPORT.md` | Extended engineering explanation |
 
-## Requirements
+## Requirements and build
 
-- Linux (tested in Ubuntu under WSL 2)
-- C++17 compiler (such as GCC)
-- CMake 3.16 or newer
-- Python 3 for running the integration tests (standard library only)
+- Linux or WSL 2 Ubuntu, with POSIX sockets and a C++17 compiler
+- CMake >= 3.16, Python 3 (standard library for tests/benchmark)
+- C++ threads supported by the toolchain
 
-This implementation uses POSIX sockets and does not build natively with Windows Winsock without changes.
-
-## Build
-
-Run from the repository root:
+From the repository root:
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-This produces `build/server` and `build/client`.
-
-## Run
-
-The server reads `students_sample.txt` from its **working directory** by default. Start both programs from the repository root in separate terminals:
-
-**Terminal 1**
+**Run** in two terminals, starting from the repository root so the sample file resolves correctly:
 
 ```bash
+# Terminal 1
 ./build/server
-```
 
-**Terminal 2**
-
-```bash
+# Terminal 2
 ./build/client
 ```
 
-Menu options:
+Client menu: `1` DNS (`localhost`), `2` student lookup (`DEMO001`), `3` quit. The sample record resolves to `alex@example.com` and is synthetic. An explicit student-data file path may be passed as the server's first argument.
 
-1. **DNS** — enter `localhost` to obtain `127.0.0.1`.
-2. **QUERY** — enter `DEMO001` to obtain `alex@example.com` from synthetic sample data.
-3. **QUIT** — end the client session.
-
-The server can also receive an explicit dataset path as its first command-line argument.
-
-## Automated tests
-
-Stop any manually launched server first, because integration tests start their own instance on port `1234`.
+To write local server events to a file:
 
 ```bash
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure -V
+./build/server 2> server.log
 ```
 
-CTest launches one Python test suite with **nine integration test cases** covering:
+`server.log` and generated benchmark outputs should not be committed.
 
-- DNS resolution and blank hostname rejection
-- Student lookup success and missing ID
-- Invalid menu option
-- TCP message fragmentation
-- Reconnection after a normal disconnect
-- Rejection of oversized frames followed by recovery
-- Recovery after abrupt disconnect
+## Automated tests and CI
 
-These are functional integration tests, not performance or security certification.
+Stop any manually running server on port 1234, then:
 
-## Engineering improvements
+```bash
+ctest --test-dir build --output-on-failure
+```
 
-**Phase 1 — Reliability & Safety:** Added message framing, complete I/O loops, bounded message size, safer interactive input, improved disconnect handling, and synthetic demonstration data.
+The configured CTest entries cover **9 functional/protocol cases + 5 concurrency cases + 1 shutdown check** (three CTest entries). Tests exercise lookup behavior, malformed input, reconnection, message fragmentation, capacity limits, abrupt disconnects and SIGINT shutdown. The GitHub Actions workflow builds and runs CTest on Ubuntu; the Phase 3 branch's initial workflow run passed. These tests do **not** establish complete race freedom or production readiness.
 
-**Phase 2 — Modern C++ & Testing:** Introduced RAII socket ownership, extracted DNS and student-directory modules, adopted CMake, and registered automated Python integration tests with CTest.
+## Performance benchmark (WSL localhost)
 
-## Current limitations
+```bash
+python3 benchmarks/benchmark.py \
+  --server ./build/server \
+  --iterations 200 --warmup 30 --runs 3
+```
 
-- Handles clients sequentially; no concurrent request processing.
-- IPv4 and localhost-only binding by design.
-- Student records are read from a simple text file; no database, authentication, or persistence of changes.
-- DNS lookup is synchronous and can block while resolving names.
-- No latency benchmark, load testing, TLS, or production hardening.
+The script starts its own server. Do not start another instance on port 1234. Each client performs sequential closed-loop requests on an established socket; 1, 2 or 4 clients are run concurrently. Each client/run has 30 warm-up and 200 measured synthetic student lookups; each concurrency level repeats three times.
 
-## Project history
+| Concurrent clients | Median throughput (requests/s) | Median P50 (ms) | Median P95 (ms) | Median P99 (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 11.31 | 88.0039 | 91.9753 | 92.1352 |
+| 2 | 22.64 | 88.0234 | 91.9142 | 92.1839 |
+| 4 | 45.27 | 88.0082 | 91.8354 | 92.2020 |
 
-Originally a Computer Networks final project (2023). The 2026 revisions focus on code quality, safety, repeatable builds, and testing. The historical commits remain in Git for context; the current source and synthetic dataset are the recommended starting point.
+*Observed October 30, 2026 on ASUS Zenbook S14 under WSL Ubuntu. Values are medians of per-run metrics; not pooled percentiles. Throughput is completed requests divided by elapsed test interval. Each timed request includes the application menu/prompt exchange, but excludes connection setup. The result includes Python client overhead, OS scheduling, WSL and server logging. It does not measure external networking, DNS resolution or exchange/HFT performance.*
+
+Within this limited load range, throughput approximately scaled with the number of active clients while median per-request latency remained near 88 ms. The cause of that baseline latency has **not** been isolated; TCP delayed ACK/Nagle interaction is only a hypothesis, not a proven cause.
+
+## Engineering evolution
+
+| Phase | Engineering focus |
+| --- | --- |
+| **1 — Reliability** | Framed TCP messages, partial I/O, bounded payloads, safe input, synthetic data |
+| **2 — Modern C++** | RAII socket ownership, modular DNS/data lookup, CMake, automated integration tests |
+| **3 — Concurrency & observability** | Four-client bound, shutdown/worker cleanup, structured logging, load tests, benchmark, CI |
+
+## Limitations and future experiments
+
+- IPv4 loopback only; no authentication, TLS, persistence or network exposure hardening.
+- Fixed maximum of four active clients and thread-per-client design; not an event-driven high-scale server.
+- Synchronous `getaddrinfo()` may extend shutdown time if DNS resolution is in progress.
+- Benchmark is a closed-loop localhost test, not an isolated wire RTT or production-grade microbenchmark.
+- Potential future experiment: controlled `TCP_NODELAY` A/B measurement, **not** implemented or claimed as an optimization here.
+
+See [Technical Report](docs/TECHNICAL_REPORT.md) for design and validation details.
 
 ## License
 
-No open-source license is currently provided. Please do not assume permission to reuse or redistribute this code unless a license is added.
+No open-source license is provided at present; reuse rights are not granted by default.
