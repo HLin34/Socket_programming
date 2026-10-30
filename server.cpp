@@ -1,27 +1,15 @@
 #include "protocol.hpp"
 #include "socket_raii.hpp"
+#include "student_directory.hpp"
 #include <arpa/inet.h>
 #include <csignal>
-#include <fstream>
 #include <iostream>
 #include <netdb.h>
-#include <sstream>
 #include <string>
 #include <sys/socket.h>
-#include <unordered_map>
 #include <unistd.h>
 
 constexpr uint16_t PORT = 1234;
-using StudentDirectory = std::unordered_map<std::string, std::string>;
-
-bool load_students(const std::string& path, StudentDirectory& directory) {
-    std::ifstream file(path);
-    if (!file) return false;
-    std::string id, email;
-    while (file >> id >> email) directory[id] = email;
-    return file.eof();
-}
-
 std::string lookup_dns(const std::string& hostname) {
     if (hostname.empty() || hostname.size() > 253 || hostname.find_first_of(" \r\n\t") != std::string::npos)
         return "Invalid hostname";
@@ -52,8 +40,8 @@ void handle_client(int fd, const StudentDirectory& directory) {
         std::string response;
         if (option == "1") response = lookup_dns(argument) + "\n";
         else {
-            auto it = directory.find(argument);
-            response = it == directory.end() ? "No such student ID\n" : "Email: " + it->second + "\n";
+            const auto email = directory.lookup(argument);
+            response = email ? "Email: " + *email + "\n" : "No such student ID\n";
         }
         if (!send_message(fd, response)) break;
     }
@@ -63,7 +51,7 @@ int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
     const std::string file_path = argc > 1 ? argv[1] : "students_sample.txt";
     StudentDirectory directory;
-    if (!load_students(file_path, directory)) {
+    if (!directory.load(file_path)) {
         std::cerr << "Could not load valid student data file: " << file_path << '\n';
         return 1;
     }
