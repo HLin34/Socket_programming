@@ -1,17 +1,20 @@
+#include "dns.hpp"
 #include "protocol.hpp"
 #include "socket_raii.hpp"
 #include "student_directory.hpp"
-#include "dns.hpp"
 #include <arpa/inet.h>
 #include <csignal>
 #include <iostream>
+#include <array>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include <netdb.h>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 
 constexpr uint16_t PORT = 1234;
-
 void handle_client(int fd, const StudentDirectory& directory) {
     while (send_message(fd, "What's your requirement? 1.DNS 2.QUERY 3.QUIT : ")) {
         std::string option;
@@ -57,12 +60,48 @@ int main(int argc, char** argv) {
         perror("bind/listen"); return 1;
     }
     std::cout << "Listening on 127.0.0.1:" << PORT << std::endl;
+    // At most 4 client-handler threads, no unbounded thread growth.
+    constexpr std::size_t MAX_CLIENTS = 4;
+    struct WorkerSlot {
+        std::thread worker;
+        std::atomic<bool> finished{true};
+    };
+    std::array<WorkerSlot, MAX_CLIENTS> slots;
     while (true) {
         sockaddr_in peer{};
         socklen_t len = sizeof(peer);
         Socket client(accept(listener.get(), reinterpret_cast<sockaddr*>(&peer), &len));
-        if (!client.valid()) { if (errno == EINTR) continue; perror("accept"); break; }
-        handle_client(client.get(), directory);
+        if (!client.valid()) {
+            if (errno == EINTR) continue;
+            perror("accept");
+            break;
+        }
+        WorkerSlot* slot = nullptr;
+        for (auto& candidate : slots) {
+            if (candidate.finished.load()) {
+                if (candidate.worker.joinable()) candidate.worker.join();
+                slot = &candidate;
+                break;
+            }
+        }
+        if (!slot) {
+            // Client expects a length-prefixed message. A full server rejects
+            // extra connections rather than creating unlimited threads.
+            send_message(client.get(), "Server busy: maximum 4 concurrent clients\n");
+            continue;
+        }
+        slot->finished.store(false);
+        // Transfer unique ownership of the socket to this worker.
+        slot->worker = std::thread(
+            [client = std::move(client), &directory, slot]() mutable {
+                handle_client(client.get(), directory);
+                slot->finished.store(true);
+            });
+    }
+    // This step retains process-level SIGINT termination semantics. Graceful
+    // shutdown of idle clients and active threads is a separate enhancement.
+    for (auto& slot : slots) {
+        if (slot.worker.joinable()) slot.worker.join();
     }
     return 0;
 }
